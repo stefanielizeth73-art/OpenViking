@@ -2833,6 +2833,8 @@ class OpenVikingMemoryProvider(MemoryProvider):
 
     def _recover_pending_sessions(self) -> None:
         """Commit sessions left pending by dead runs, one thread per former owner."""
+        if not self._writes_enabled:
+            return
         scope = self._capture_commit_scope()
         if not scope.client:
             return

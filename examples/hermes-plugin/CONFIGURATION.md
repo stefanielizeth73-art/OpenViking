@@ -326,7 +326,8 @@ exceed it, and the server may include other context during extraction.
 When Hermes initializes the provider with `agent_context` set to `cron`, `subagent`,
 or `flush`, recall and profile reads keep working. Automatic turn uploads,
 session-end/switch commits, and native memory mirroring are skipped for that
-context. Startup recovery can still commit pending messages from earlier sessions.
+context. Startup recovery also skips commits in these contexts. Pending messages
+remain available for recovery when the next primary context starts.
 Explicit `viking_*` tools keep their normal behavior, including writes and deletes.
 Interactive sessions (and hosts that predate `agent_context`) keep the previous
 automatic write behavior.
