@@ -1,6 +1,8 @@
 # Copyright (c) 2026 Beijing Volcano Engine Technology Co., Ltd.
 # SPDX-License-Identifier: AGPL-3.0
 
+import pytest
+
 from openviking.service.task_store import PersistentTaskStore
 from openviking.service.task_tracker import TaskTracker
 from openviking_cli.utils.config import storage_config as storage_config_module
@@ -54,3 +56,23 @@ def test_storage_config_builds_persistent_task_tracker():
     tracker = StorageConfig().build_task_tracker(_FakeAgfs())
     assert isinstance(tracker, TaskTracker)
     assert isinstance(tracker._store, PersistentTaskStore)
+
+
+@pytest.mark.parametrize("backend", ["agfs", "vectordb"])
+@pytest.mark.parametrize("dump", [False, True])
+def test_storage_paths_warn_only_when_overridden(tmp_path, monkeypatch, backend, dump):
+    warnings = []
+    monkeypatch.setattr(storage_config_module.logger, "warning", warnings.append)
+    workspace = str(tmp_path / "workspace")
+    config = StorageConfig(workspace=workspace)
+    for _ in range(2):
+        config = StorageConfig.model_validate(config.model_dump() if dump else config)
+        assert config.agfs.path == config.vectordb.path == config.workspace
+    assert not any(".path'" in message for message in warnings)
+
+    config = StorageConfig(workspace=workspace, **{backend: {"path": str(tmp_path / "old")}})
+    assert config.agfs.path == config.vectordb.path == config.workspace
+    assert len([message for message in warnings if f"'{backend}.path'" in message]) == 1
+    warnings.clear()
+    StorageConfig.model_validate(config.model_dump())
+    assert not any(".path'" in message for message in warnings)
