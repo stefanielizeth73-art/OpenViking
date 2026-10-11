@@ -23,7 +23,6 @@ from openviking.service.session_service import SessionService
 from openviking_cli.session.user_id import UserIdentifier
 from openviking_cli.utils.config.memory_config import SessionAutoCommitConfig
 
-
 _REAL_DATETIME = datetime
 
 
@@ -160,6 +159,7 @@ class _FakeSessionMeta:
         keep_recent_count: int = 0,
         last_message_at: str = "",
         last_auto_commit_at: str = "",
+        updated_at: str = "",
     ) -> None:
         self.auto_commit_policy = auto_commit_policy
         self.pending_tokens = pending_tokens
@@ -167,6 +167,7 @@ class _FakeSessionMeta:
         self.keep_recent_count = keep_recent_count
         self.last_message_at = last_message_at
         self.last_auto_commit_at = last_auto_commit_at
+        self.updated_at = updated_at
 
     def to_dict(self) -> dict:
         return {
@@ -176,6 +177,7 @@ class _FakeSessionMeta:
             "keep_recent_count": self.keep_recent_count,
             "last_message_at": self.last_message_at,
             "last_auto_commit_at": self.last_auto_commit_at,
+            "updated_at": self.updated_at,
         }
 
 
@@ -490,6 +492,46 @@ async def test_scheduler_scans_agfs_paths_directly_without_account_user_indices(
     assert service.calls == [
         ("session_due", "idle_timeout", "user_b"),
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "last_message_at,updated_at,message_count,expected",
+    [
+        ("", "2000-01-01T00:00:00+00:00", 1, True),
+        ("", "2999-01-01T00:00:00+00:00", 1, False),
+        ("2999-01-01T00:00:00+00:00", "2000-01-01T00:00:00+00:00", 1, False),
+        ("invalid", "2000-01-01T00:00:00+00:00", 1, False),
+        ("", "2000-01-01T00:00:00+00:00", 0, False),
+        ("", "", 1, False),
+    ],
+)
+async def test_imported_session_idle_scan_and_commit_agree(
+    monkeypatch, last_message_at, updated_at, message_count, expected
+):
+    meta = _meta(last_message_at=last_message_at, pending_tokens=0, message_count=message_count)
+    meta["updated_at"] = updated_at
+    scanned = _FakeSessionService(
+        [_session_entry("imported")],
+        {"/local/acct_a/user/user_b/sessions/imported/.meta.json": meta},
+    )
+    scheduler = SessionAutoCommitScheduler(
+        scanned, SimpleNamespace(enabled=True, scan_rate_limit_files_per_second=0)
+    )
+    await scheduler._scan_once()
+    assert bool(scanned.calls) is expected
+
+    session = _FakeAutoCommitSession(
+        _FakeSessionMeta(
+            auto_commit_policy=meta["auto_commit_policy"],
+            message_count=message_count,
+            last_message_at=last_message_at,
+            updated_at=updated_at,
+        )
+    )
+    service = _session_service_for_auto_commit_test(monkeypatch, session)
+    await service.run_auto_commit("imported", _auto_commit_ctx(), reason="idle_timeout")
+    assert session.commit_calls == ([(0, False, True)] if expected else [])
 
 
 @pytest.mark.asyncio

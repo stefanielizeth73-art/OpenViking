@@ -662,7 +662,9 @@ class SessionService:
                 return False
             if self._within_min_commit_interval(session, policy):
                 return False
-            next_check_at = compute_next_check_at(session.meta.last_message_at, idle_timeout)
+            next_check_at = compute_next_check_at(
+                session.meta.last_message_at, idle_timeout, updated_at=session.meta.updated_at
+            )
             if not next_check_at:
                 return False
             return is_next_check_due(next_check_at, datetime.now()) is True

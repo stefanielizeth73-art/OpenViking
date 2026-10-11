@@ -303,7 +303,11 @@ def get_keep_recent_count(policy: Optional[Dict[str, Any]]) -> int:
     return max(0, resolve_policy(policy).keep_recent_count)
 
 
-def compute_next_check_at(last_message_at: str, idle_timeout_seconds: int) -> Optional[str]:
+def compute_next_check_at(
+    last_message_at: str, idle_timeout_seconds: int, *, updated_at: str = ""
+) -> Optional[str]:
+    # Imported sessions may predate last_message_at; keep the fallback read-only.
+    last_message_at = last_message_at or updated_at
     if not last_message_at:
         return None
     try:
@@ -352,7 +356,9 @@ def _is_idle_policy_due(meta: Dict[str, Any], now: datetime) -> bool:
         return False
     if not has_idle_uncommitted_content(meta):
         return False
-    next_check_at = compute_next_check_at(meta.get("last_message_at", ""), idle_timeout)
+    next_check_at = compute_next_check_at(
+        meta.get("last_message_at", ""), idle_timeout, updated_at=meta.get("updated_at", "")
+    )
     if not next_check_at:
         return False
     return is_next_check_due(next_check_at, now) is True
