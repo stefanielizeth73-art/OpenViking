@@ -1367,21 +1367,22 @@ def test_recovery_lock_handoff_keeps_one_inode(external_provider):
     assert acquired
     second = None
     third = None
+    handoff_acquired = False
 
     class Handoff:
         def fileno(self):
             return first.fileno()
 
         def close(self):
-            nonlocal second
+            nonlocal second, handoff_acquired
             # This is the legal schedule after A unlocks and before A removes
             # the pathname. B acquires the existing inode during that gap.
-            acquired, second = provider._claim_owner_run_for_recovery(owner)
-            assert acquired
+            handoff_acquired, second = provider._claim_owner_run_for_recovery(owner)
             first.close()
 
     try:
         provider._flock_close(Handoff(), path, "owner run lock")
+        assert handoff_acquired, "second recovery could not claim the released owner lock"
         # B still holds its lock. C must not obtain a second lock for this owner.
         acquired, third = provider._claim_owner_run_for_recovery(owner)
         old_inode = os.fstat(second.fileno()).st_ino

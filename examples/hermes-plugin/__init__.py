@@ -2903,6 +2903,8 @@ class OpenVikingMemoryProvider(MemoryProvider):
             steps.append(("close", lock_file.close))
         # Keep the pathname stable: another recovery may already hold or be
         # waiting on this inode when the lock is released.
+        # Run files intentionally persist after shutdown; see CONFIGURATION.md
+        # for their storage cost and the offline cleanup requirement.
         for verb, step in steps:
             try:
                 step()
