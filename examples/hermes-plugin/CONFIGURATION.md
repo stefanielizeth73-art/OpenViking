@@ -430,6 +430,7 @@ hermes plugins install 'volcengine/OpenViking/examples/hermes-plugin' \
 
 Connection settings and server data are retained. Restart Hermes or the gateway
 after updating.
+
 ## Recovery lock files
 
 On platforms with POSIX advisory locks, each initialized provider creates an
@@ -445,6 +446,11 @@ deleting the pathname, even while holding its lock, can let a later process
 create and lock a different inode for the same owner. Failed acquisitions must
 also leave another holder's file intact.
 
+Online deletion is unsafe under the current locking protocol. It is not
+impossible in principle: safe online cleanup would need a coordination protocol
+that also covers processes opening or waiting for a lock, with concurrency tests
+for that protocol. Such a protocol change is outside this focused fix.
+
 There is deliberately no online garbage collector. Each new run leaves one
 empty file, so file count, inode use and directory metadata grow with the number
 of runs even though the files contain no conversation data. This trades ongoing
@@ -458,4 +464,5 @@ starting before removing obsolete `.lock` files from `openviking/runs/`. Do not
 delete the directory or files under `openviking/pending_sessions/`: those markers
 are needed for recovery. Once all old descriptors are closed, a future recovery
 can safely recreate the lock files it needs. File age or an apparently unlocked
-file alone is not sufficient evidence that online deletion is safe.
+file alone is not sufficient evidence that online deletion is safe under the
+current protocol.
