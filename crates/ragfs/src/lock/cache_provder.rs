@@ -509,7 +509,7 @@ impl RedisPathLockProvider {
             }
         };
         Ok(format!(
-            "ov:pathlock:{{{}}}:{suffix}:tokens",
+            "{{{}}}:ov:pathlock:{suffix}:tokens",
             self.service_name
         ))
     }
@@ -1337,7 +1337,7 @@ return redis.call("HGET", KEYS[1], ARGV[2])
             let raw = runtime
                 .execute_script(ScriptRequest {
                     script_id: TEST_HASH_ID.to_string(),
-                    keys: vec![format!("ov:pathlock:{{{service_name}}}:{scope}:tokens")],
+                    keys: vec![format!("{{{service_name}}}:ov:pathlock:{scope}:tokens")],
                     args: vec![
                         RedisPathLockProvider::bytes("get"),
                         RedisPathLockProvider::bytes(path),
@@ -1578,6 +1578,16 @@ return redis.call("HGET", KEYS[1], ARGV[2])
 
         assert_eq!(adopted.lease.lock_paths, vec!["/local/account-a/a"]);
         second.release(&adopted).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if first.observe().await.active_locks == 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("producer must forget a released cross-manager handoff");
         let legacy = PathLockHandoffRef {
             lease_ref: None,
             owner_id: "owner-a".to_string(),
