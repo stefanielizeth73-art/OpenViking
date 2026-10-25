@@ -573,7 +573,7 @@ Version 1.39.0 is the minimum SDK version with the client context managers and c
     "dense": {
       "provider": "gemini",
       "api_key": "your-google-api-key",
-      "model": "gemini-embedding-2-preview",
+      "model": "gemini-embedding-2",
       "dimension": 3072
     }
   }
@@ -581,11 +581,17 @@ Version 1.39.0 is the minimum SDK version with the client context managers and c
 ```
 
 Available Gemini embedding models:
-- `gemini-embedding-2-preview`: 8192 token input limit, 1–3072 output dimension (MRL)
+- `gemini-embedding-2`: 8192 token input limit, 1–3072 output dimension (MRL)
 - `gemini-embedding-001`: 2048 token input limit, 1–3072 output dimension (MRL)
 - `text-embedding-004`: 2048 token input limit, 768 output dimension (fixed)
 
 Recommended dimensions: `768`, `1536`, or `3072` (default: `3072`).
+
+Gemini Embedding 2 represents task types as documented text instructions because
+the stable model does not accept the `task_type` request field. OpenViking applies
+these instructions when `query_param` or `document_param` is configured. If you
+change the model for an existing index, rebuild its vectors unless the provider
+explicitly guarantees that the two embedding spaces are compatible.
 
 Get your API key at https://aistudio.google.com/apikey
 
@@ -648,7 +654,7 @@ Get your API key at https://dashscope.console.aliyun.com/api-key
     "dense": {
       "provider": "gemini",
       "api_key": "your-google-api-key",
-      "model": "gemini-embedding-2-preview",
+      "model": "gemini-embedding-2",
       "dimension": 3072,
       "query_param": "RETRIEVAL_QUERY",
       "document_param": "RETRIEVAL_DOCUMENT"
@@ -942,6 +948,8 @@ Set the number of concurrent workers per Resource Compile task and stage, for bo
 | `reduce_concurrency` | Inherits `vlm.max_concurrent` | Concurrent Reduce jobs; final same-path candidate merges reuse this value |
 
 Concurrency values must be positive integers; omitted or `null` values inherit the default. `shuffle_batch_size` must be a positive integer, defaults to `4`, and does not accept `null`. Routing saves valid decisions individually and re-batches only failed records; the final retry uses single-record requests, with at most three rounds per record. Restart VikingBot after changing these settings. All Compile tasks within one VikingBot service still share the model-request capacity set by `vlm.max_concurrent`, so raising stage concurrency cannot exceed that total limit. Embedding requests also obey the embedding service's own concurrency limit. Recovery uses the same reduce setting by default; an explicit `--concurrency` overrides recovery concurrency.
+
+Compile inherits the model's thinking and reasoning settings. Model requests use the effective model timeout (`bot.agents.timeout`, or inherited `vlm.timeout`).
 
 ### query_planner
 
@@ -1283,6 +1291,7 @@ Storage configuration for context data, including file storage (RAGFS) and vecto
 | `skip_process_lock` | bool | Skip the exclusive `.openviking.lock` file lock on `storage.workspace` for embedded vector backends (`local`, `cuvs`). Other backends do not acquire this lock. Skipping it does not make embedded vector storage safe for multiple processes. | `false` |
 | `agfs` | object | RAGFS (Rust-based AGFS) configuration | {} |
 | `vectordb` | object | Vector database storage configuration | {} |
+| `task_store` | object | Durable Task/Work backend configuration | `{"provider":"file"}` |
 
 
 ```json
@@ -1299,6 +1308,41 @@ Storage configuration for context data, including file storage (RAGFS) and vecto
   }
 }
 ```
+
+#### task_store
+
+Task records use the local FileStore by default. To share Task/Work state across
+OpenViking processes, provision `openviking/service/sql/task_store_init.sql` in
+MySQL and select the relational backend:
+
+```json
+{
+  "storage": {
+    "task_store": {
+      "provider": "mysql",
+      "params": {
+        "user": "openviking",
+        "password": "change-me",
+        "database": "openviking",
+        "host": "127.0.0.1",
+        "port": 3306,
+        "table": "ov_tasks"
+      }
+    }
+  }
+}
+```
+
+`params.table` is the table prefix. It must start with an ASCII letter, contain
+only ASCII letters, digits, or underscores, and be at most 38 characters so
+derived table, index, and constraint names fit MySQL's 64-character limit.
+Replace `ov_tasks` consistently in the provisioning SQL when using a custom prefix.
+
+The MySQL backend requires the `openviking[mysql]` extra. Its mutations,
+Task finalization, and execution-event updates commit in one database
+transaction. `task_id` is globally unique; `account_id` and `user_id` scope
+authorization and queries. Do not use the FileStore tables and MySQL tables as
+active writers for the same deployment.
 
 #### agfs (RAGFS)
 
@@ -1454,7 +1498,7 @@ Notes:
 - All Redis reads go to the primary. Replica reads are not configurable.
 - `tls_insecure_skip_verify=true` requires `rediss://` endpoints.
 - QueueFS cache keys use `{service_name}:ov:*`; use different service names for deployments sharing one Redis cluster.
-- Redis backend runs three bounded `recover_stale` sweeps in a dedicated startup recovery thread at startup, 30 seconds, and 60 seconds to cover the heartbeat-expiry window after a container restart; it does not run long-lived periodic recovery.
+- Cache instances renew a 30-second heartbeat every 10 seconds. One live instance per QueueFS cache namespace holds a token-checked 30-second leader lease and scans for stale `processing` messages every 10 seconds. If that instance stops, another instance takes over after the lease expires; a normal shutdown removes its heartbeat so recovery can begin immediately.
 - If both `storage.agfs.queuefs.db_path` and legacy `storage.agfs.queue_db_path` are set, `storage.agfs.queuefs.db_path` wins.
 - If QueueFS backend is `memory`, any `db_path` or legacy `queue_db_path` is ignored.
 

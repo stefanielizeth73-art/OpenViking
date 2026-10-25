@@ -59,13 +59,13 @@ Admin API 用于多租户环境下的账户、用户和用户组管理。包括�
 
 用户组属于单个 account，用于通过一个 ACL principal 授权多个用户。`group_id` 由调用者创建时指定，使用与 `user_id` 相同的标识符规则，是 account 内唯一且稳定的标识；不存在单独的组名。组内只能加入当前 account 已存在的用户，不支持嵌套组。
 
-成员关系由服务端加入每次请求的 `RequestContext.group_ids`。添加或移除成员从下一次请求开始生效，不重写资源 ACL 或 context 记录。用户被删除时会自动退出所有组；用户组必须为空才能删除。
+成员关系由服务端加入每次请求的 `RequestContext.group_ids`。添加或移除成员从下一次请求开始生效，不重写资源 ACL 或 context 记录。用户被删除时会自动退出所有组。无论组是否为空，都可以直接删除；删除组会移除该组的全部成员关系，保留用户及其凭证，也不重写资源 ACL 或 context 记录。
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | POST | `/api/v1/admin/accounts/{account_id}/groups` | 创建空组，请求体为 `{"group_id":"engineering"}` |
 | GET | `/api/v1/admin/accounts/{account_id}/groups` | 列出组 |
-| DELETE | `/api/v1/admin/accounts/{account_id}/groups/{group_id}` | 删除空组 |
+| DELETE | `/api/v1/admin/accounts/{account_id}/groups/{group_id}` | 删除组及其全部成员关系，允许组内仍有成员 |
 | GET | `/api/v1/admin/accounts/{account_id}/groups/{group_id}/members` | 列出成员 |
 | PUT | `/api/v1/admin/accounts/{account_id}/groups/{group_id}/members/{user_id}` | 幂等添加成员；重复调用返回 `added=true` |
 | DELETE | `/api/v1/admin/accounts/{account_id}/groups/{group_id}/members/{user_id}` | 移除成员；重复调用返回 `removed=false` |
@@ -79,9 +79,61 @@ ov --sudo admin remove-group-member acme engineering alice
 ov --sudo admin delete-group acme engineering
 ```
 
+要直接删除仍有成员的组，可调用 `DELETE /api/v1/admin/accounts/acme/groups/engineering`。
+
 Python SDK 提供对应的 `admin_create_group`、`admin_list_groups`、`admin_list_group_members`、`admin_add_group_member`、`admin_remove_group_member` 和 `admin_delete_group`；Go SDK 使用相同名称的 PascalCase 方法。
 
 ## API 参考
+
+### account / user 存在性查询
+
+创建 Account/User 前可用两个精确判存接口替代“列出后本地比对”。二者都命中内存注册表，时间复杂度 O(1)，且只返回无凭据信息；开启 `server.api_key_watch_enabled` 时直接读内存，关闭时会回退读取持久化的注册表。
+
+**查询单个 Account（仅 ROOT）**
+
+```
+GET /api/v1/admin/accounts/{account_id}
+```
+
+命中返回该 Account 的无凭据元数据；不存在返回 404。
+
+```bash
+curl "http://localhost:1933/api/v1/admin/accounts/team-a" \
+  -H "X-API-Key: <root-key>"
+```
+
+```json
+{
+  "status": "ok",
+  "result": {
+    "account_id": "team-a",
+    "created_at": "2026-10-20T03:00:00Z",
+    "user_count": 2,
+    "status": "active"
+  }
+}
+```
+
+`status` 为 `deleting` 时附带 `task_id`。响应不包含 `api_key`、`user_key`、`key_prefix` 或 `seed`。
+
+**查询单个 User 的成员信息（ROOT 或本 Account 的 ADMIN）**
+
+```
+GET /api/v1/admin/accounts/{account_id}/users/{user_id}
+```
+
+点读单个用户，仅返回无凭据的成员信息，刻意不复用任何会返回凭据的 user 读取形态：
+
+```bash
+curl "http://localhost:1933/api/v1/admin/accounts/team-a/users/alice" \
+  -H "X-API-Key: <root-key>"
+```
+
+```json
+{ "status": "ok", "result": { "user_id": "alice", "role": "admin" } }
+```
+
+返回仅含 `user_id` 与 `role`，**不包含** `api_key` 或 `key_prefix`。用户不存在返回 404。ADMIN 只能查询自己所属的 Account，跨 Account 返回 403。创建前的判重可据此进行；并发唯一性仍由创建时的写入冲突（`ALREADY_EXISTS`）兜底。
 
 ### get_agent_evolution_status
 
@@ -232,7 +284,7 @@ DELETE 始终移除该类型的覆盖；重复 PUT 默认配置或 DELETE 都是
 按 Account、按模板独立存储：
 
 ```text
-/local/{account_id}/_system/memory_templates/
+viking://system/memory/memory_templates/custom/
   profile.yaml
   preferences.yaml
   events.yaml
@@ -240,18 +292,26 @@ DELETE 始终移除该类型的覆盖；重复 PUT 默认配置或 DELETE 都是
 ```
 
 仅发布自定义时创建对应文件。文件包含完整 Schema 和内部 `_updated_at` 时间戳，
-不再使用集中式 `memory_templates.json`。更新前备份至 `{type}.yaml.backup`。
+不再使用集中式 `memory_templates.json`。更新和重置不生成可见备份，并会清理旧版本遗留的
+`{type}.yaml.backup`。
 读写经过 AGFS，沿用当前部署的加密和存储配置，不能直接编辑加密后的底层文件。
 不修改 Account 的 `setting.json` 或 User 的 `user_config.json`。
 个人版使用默认 Account；企业版使用指定 Account，内核不区分两套文件结构。
+
+读取优先使用上述新路径；仅当新文件不存在时，才兼容读取旧路径
+`/local/{account_id}/_system/memory_templates/{type}.yaml`。读取不会迁移或改写文件。
+如果优先级更高的文件损坏，不会静默回退到低优先级文件或部署默认。
 
 模板读取不加锁。发布先在同目录写完唯一临时文件，再通过 AGFS 切换到正式路径：
 LocalFS 使用文件重命名，S3 使用完整对象复制替换目标后再删除临时对象，不先删除目标。
 读者允许看到完整旧版或新版；首次发布之前、恢复默认之后读取部署默认值，不读取临时文件。
 这是单文件发布语义，不保证一次列表/Registry 读取中的所有模板来自同一发布时刻。
-发布与 DELETE 仍使用跨进程写锁；发布锁同时覆盖正式路径和临时路径。锁冲突采用零等待尝试和
+发布与 DELETE 仍使用跨进程写锁；发布锁同时覆盖新路径、旧路径、遗留 backup 路径和临时路径。
+PUT 只发布到新路径，确认发布成功后再删除旧文件；DELETE 先删除旧文件，再删除新文件，
+防止旧配置重新生效。
+显式 PUT/DELETE 可替换或清理损坏文件。锁冲突采用零等待尝试和
 协程退避，最多等待 10 秒，避免锁等待占满执行后续 I/O 的默认线程池。
-临时写入失败不修改当前文件；切换后清理失败只记警告，不覆盖回滚已发布版本。
+临时写入失败不修改当前文件；切换后临时文件清理失败只记警告，不覆盖回滚已发布版本。
 若切换返回错误，会核验目标内容：确认已发布则保留新版本；无法确认则返回错误且不盲目回滚，调用方可 GET 确认状态。
 取消等待锁的请求会停止重试；已下发的 native 操作不能强行中断，会完成收尾并释放锁后再传播取消。
 因此取消已开始发布的请求不保证撤销发布。进程异常退出或清理失败可能留下 `.tmp` 文件，但读取不会使用它们。
@@ -450,6 +510,56 @@ PATCH 会先做结构校验，再构造合并后的配置：未知路径和运�
 其他配置节通过完整文件编辑。
 
 文件含美元符号、Windows `%VAR%` 引用或转义的美元/百分号时，读取和预览返回 `form_readonly: true`，不返回模型表单数据，并拒绝表单修改。请使用文件模式编辑原文，包括带引号和未带引号的环境变量引用。验证沿用启动时对原文展开环境变量的流程，保存不会重新序列化文档。文件校验会应用 CLI 启动参数覆盖，与重启时的处理一致。
+
+#### 草稿模型连接测试
+
+ROOT 可以测试草稿 VLM 或 Embedding 连接，而不保存或发布提交的配置。
+这是 Studio 使用的私有接口，刻意不出现在生成的 OpenAPI schema 中，
+并始终返回 `Cache-Control: no-store`。
+
+```http
+POST /api/v1/admin/configuration/test-model
+Content-Type: application/json
+X-API-Key: <root-api-key>
+```
+
+| 字段 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| `kind` | string | 是 | - | `vlm` 或 `embedding` |
+| `config` | object | 是 | - | 待测试的草稿 provider 凭证或端点字段 |
+| `fallback` | object | 否 | `{}` | 现有生效配置，用于补齐未提交的非敏感字段 |
+| `thinking` | boolean | 否 | `null` | 本次 VLM 探测的 thinking 模式覆盖 |
+| `mode` | string | 否 | `dense` | Embedding 模式：`dense`、`sparse` 或 `hybrid` |
+
+```bash
+curl -X POST http://localhost:1933/api/v1/admin/configuration/test-model \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: <root-api-key>" \
+  -d '{
+    "kind": "vlm",
+    "config": {
+      "provider": "openai",
+      "api_key": "draft-key"
+    },
+    "fallback": {
+      "model": "gpt-4.1"
+    }
+  }'
+```
+
+**响应示例**
+
+```json
+{
+  "status": "ok",
+  "result": {
+    "ok": true,
+    "ms": 120
+  }
+}
+```
+
+该接口会脱敏 provider 错误，并且不会持久化提交的草稿配置。
 
 #### 服务端重启
 
